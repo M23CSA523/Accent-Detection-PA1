@@ -8,10 +8,10 @@ This script performs the following:
 3. Loads the UrbanSound8K dataset from the proper directory and trains a simple CNN classifier on the spectrogram features.
 4. Generates and saves spectrograms for sample songs from different genres.
 
-IMPORTANT: 
+IMPORTANT:
 - Ensure that the UrbanSound8K dataset is placed in the folder: data/UrbanSound8K/
-- Ensure that sample song files (e.g., rock_sample.wav, classical_sample.wav, pop_sample.wav, jazz_sample.wav) are in data/songs/
-- This script assumes that the UrbanSound8K metadata CSV file is located at: data/UrbanSound8K/metadata/UrbanSound8K.csv
+- The metadata CSV file must be at: data/UrbanSound8K/metadata/UrbanSound8K.csv
+- Audio files for UrbanSound8K should be in data/UrbanSound8K/audio/ (organized by fold)
 """
 
 import os
@@ -27,19 +27,6 @@ import pandas as pd
 # Function to Compute Log-Scaled Spectrograms
 # -----------------------------
 def compute_log_spectrogram(waveform, sample_rate, n_fft=1024, hop_length=512, window_type='hann'):
-    """
-    Computes the log-scaled spectrogram using STFT with the specified window function.
-    
-    Args:
-        waveform (Tensor): Audio waveform tensor.
-        sample_rate (int): Sample rate of the audio.
-        n_fft (int): Number of FFT points.
-        hop_length (int): Hop length for STFT.
-        window_type (str): Type of window ('hann', 'hamming', or 'rectangular').
-        
-    Returns:
-        Tensor: Log-scaled spectrogram.
-    """
     if window_type.lower() == 'hann':
         window = torch.hann_window(n_fft)
     elif window_type.lower() == 'hamming':
@@ -48,8 +35,18 @@ def compute_log_spectrogram(waveform, sample_rate, n_fft=1024, hop_length=512, w
         window = torch.ones(n_fft)
     else:
         raise ValueError("Invalid window type. Choose 'hann', 'hamming', or 'rectangular'.")
+
+    # Ensure waveform is on CPU before applying stft
+    waveform = waveform.cpu()
     
-    stft_result = torch.stft(waveform, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    try:
+        # Using return_complex=True (requires PyTorch >= 1.8)
+        stft_result = torch.stft(waveform, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+    except TypeError:
+        # For older PyTorch versions, remove return_complex and convert manually
+        stft_result = torch.stft(waveform, n_fft=n_fft, hop_length=hop_length, window=window)
+        stft_result = torch.sqrt(stft_result[..., 0]**2 + stft_result[..., 1]**2)
+    
     magnitude = torch.abs(stft_result)
     log_spectrogram = torch.log1p(magnitude)
     return log_spectrogram
@@ -60,20 +57,19 @@ def compute_log_spectrogram(waveform, sample_rate, n_fft=1024, hop_length=512, w
 def display_spectrogram(spectrogram, title, save_path=None):
     """
     Displays and optionally saves a spectrogram image.
-    
-    Args:
-        spectrogram (Tensor): Spectrogram tensor.
-        title (str): Title for the plot.
-        save_path (str, optional): Path to save the image file.
+    Ensures the tensor is on CPU before converting to a NumPy array.
     """
     plt.figure(figsize=(10, 4))
-    plt.imshow(spectrogram.squeeze().numpy(), origin='lower', aspect='auto', cmap='viridis')
+    # Move the tensor to CPU if necessary before converting to NumPy.
+    spec_np = spectrogram.squeeze().cpu().numpy()
+    plt.imshow(spec_np, origin='lower', aspect='auto', cmap='viridis')
     plt.title(title)
     plt.xlabel("Time")
     plt.ylabel("Frequency")
     plt.colorbar(label="Log Magnitude")
     if save_path:
         plt.savefig(save_path)
+        print(f"[INFO] {title} saved to: {save_path}")
     plt.show()
 
 # -----------------------------
@@ -104,8 +100,9 @@ class UrbanSoundDataset(Dataset):
         row = self.metadata.iloc[index]
         fold = f"fold{row['fold']}"
         file_path = os.path.join(self.data_dir, fold, row['slice_file_name'])
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Audio file not found: {file_path}")
         waveform, sample_rate = torchaudio.load(file_path)
-        # If stereo, convert to mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
         log_spec = compute_log_spectrogram(waveform, sample_rate, window_type=self.window_type)
@@ -165,15 +162,16 @@ if __name__ == '__main__':
     if not os.path.exists(metadata_csv):
         raise FileNotFoundError(f"Metadata CSV not found at {metadata_csv}. Please ensure the UrbanSound8K dataset is correctly placed.")
     
-    # Visualize spectrograms for a sample file using different window functions.
     sample_file = os.path.join(audio_dir, 'fold1', '101415-3-0-2.wav')
     if not os.path.exists(sample_file):
         raise FileNotFoundError(f"Sample file not found at {sample_file}. Check your UrbanSound8K data placement.")
     
+    print("Loading sample file for windowing experiments...")
     sample_waveform, sr = torchaudio.load(sample_file)
     sample_waveform = sample_waveform[:, :sr]  # Use a 1-second clip
     
     for win in ['hann', 'hamming', 'rectangular']:
+        print(f"Processing window type: {win}")
         log_spec = compute_log_spectrogram(sample_waveform, sr, window_type=win)
         title = f"{win.capitalize()} Window Spectrogram"
         save_file = os.path.join('results', f'spectrogram_{win}.png')
@@ -192,10 +190,11 @@ if __name__ == '__main__':
     
     print(f"Training classifier using features from the {selected_window} window...")
     train_classifier(model, dataloader, criterion, optimizer, num_epochs=15, device=device)
-    torch.save(model.state_dict(), os.path.join('code', f'urbansound_cnn_{selected_window}.pth'))
+    model_save_path = os.path.join('code', f'urbansound_cnn_{selected_window}.pth')
+    torch.save(model.state_dict(), model_save_path)
+    print(f"Model saved to: {model_save_path}")
     
     # PART B: Comparative Analysis for Songs from Different Genres
-    # IMPORTANT: Ensure sample songs are placed in data/songs/ with the following filenames.
     song_files = {
         'rock': 'data/songs/rock_sample.wav',
         'classical': 'data/songs/classical_sample.wav',
