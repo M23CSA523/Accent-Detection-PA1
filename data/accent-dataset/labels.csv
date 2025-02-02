@@ -1,5 +1,4 @@
 filename,label
-sample1.wav,0
-sample2.wav,1
-sample3.wav,2
-sample4.wav,3
+us_sample.wav,0
+uk_sample.wav,1
+au_sample.wav,2
